@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import queue
 import re
 import struct
 import threading
 import time
 import tkinter as tk
+from bisect import bisect_left
 from collections import deque
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -40,7 +42,7 @@ MUTED = "#667085"
 GRID = "#E4EAF2"
 
 NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
-
+PA_CSV_HEADER = ("time_s", "type", "value", "res", "lk", "rk", "hk", "ha", "message")
 COMMAND_OPTIONS = (
     ("e;", "Endstop mode"),
     ("d;", "ADC data output via UART"),
@@ -536,6 +538,23 @@ class SerialMonitorApp:
         self.last_plot_update = 0.0
         self.last_response_update = 0.0
 
+        self.recording = False
+        self.record_rows: list[tuple] = []
+        self.record_file_path: Path | None = None
+        self.record_samples = 0
+        self.record_results = 0
+        self.record_button_text = ""
+
+        self.replay_times: list[float] = []
+        self.replay_values: list[float] = []
+        self.replay_markers: list[tuple[float, float]] = []
+        self.replay_file = ""
+        self.replay_playing = False
+        self.replay_position = 0.0
+        self.replay_wall_t0 = 0.0
+        self.replay_play_t0 = 0.0
+        self.replay_speed = 1.0
+
         self.port_var = tk.StringVar(value=initial_port)
         self.baud_var = tk.StringVar(value=str(initial_baud))
         self.status_var = tk.StringVar(value="Disconnected")
@@ -544,6 +563,7 @@ class SerialMonitorApp:
         self.max_var = tk.StringVar(value="--")
         self.points_var = tk.StringVar(value="0")
         self.window_var = tk.DoubleVar(value=DEFAULT_WINDOW_SECONDS)
+        self.replay_speed_var = tk.StringVar(value="1x")
         self.auto_scale_var = tk.BooleanVar(value=True)
         self.command_var = tk.StringVar()
         self.command_hint_var = tk.StringVar(value="Select a command or enter a custom command")
@@ -786,6 +806,9 @@ class SerialMonitorApp:
         self.axes.set_xlim(0, DEFAULT_WINDOW_SECONDS)
         self.axes.set_ylim(4000, 6000)
         (self.plot_line,) = self.axes.plot([], [], color=ACCENT, linewidth=1.25)
+        (self.replay_marker_line,) = self.axes.plot(
+            [], [], linestyle="None", marker="o", markersize=5, color=RED, zorder=5
+        )
         figure.tight_layout(pad=1.8)
 
         canvas_frame = tk.Frame(parent, bg=PANEL)
@@ -821,6 +844,28 @@ class SerialMonitorApp:
             style="Dark.TCheckbutton",
         ).pack(side="left")
 
+        self.replay_button = self._button(
+            plot_controls, "Replay CSV", self.toggle_replay, width=12, bg=CARD
+        )
+        self.replay_button.pack(side="right", padx=(14, 0))
+        self.replay_load_button = self._button(
+            plot_controls, "…", self.choose_replay_file, width=3, bg=CARD
+        )
+        self.replay_load_button.pack(side="right")
+        self.replay_speed_combo = ttk.Combobox(
+            plot_controls,
+            textvariable=self.replay_speed_var,
+            values=("0.25x", "0.5x", "1x", "2x", "5x", "10x", "50x", "Max"),
+            width=6,
+            state="disabled",
+            style="Dark.TCombobox",
+        )
+        self.replay_speed_combo.pack(side="right")
+        self.replay_speed_combo.bind("<<ComboboxSelected>>", self._on_replay_speed)
+        self.record_button = self._button(
+            plot_controls, "Record PA CSV", self.toggle_recording, width=14, bg=GREEN
+        )
+        self.record_button.pack(side="right", padx=(14, 0))
         self.pause_button = self._button(plot_controls, "Pause", self.toggle_pause, width=9, bg=CARD)
         self.pause_button.pack(side="right", padx=(8, 0))
         self._button(plot_controls, "Clear", self.clear_data, width=9, bg=CARD).pack(side="right")
@@ -977,7 +1022,7 @@ class SerialMonitorApp:
         bg: str = CARD,
         active: str = CARD_HOVER,
     ) -> tk.Button:
-        foreground = "#FFFFFF" if bg in (ACCENT, RED) else TEXT
+        foreground = "#FFFFFF" if bg in (ACCENT, RED, GREEN) else TEXT
         return tk.Button(
             parent,
             text=text,
@@ -1465,6 +1510,8 @@ class SerialMonitorApp:
 
     def disconnect(self) -> None:
         was_connected = self.worker.connected
+        if self.recording:
+            self.stop_recording()
         self.worker.disconnect()
         self._set_connected_state(False)
         self.refresh_ports()
@@ -1505,6 +1552,301 @@ class SerialMonitorApp:
             self.command_var.set(command)
             self.command_hint_var.set(f"{command}  —  {description}")
 
+    def toggle_recording(self) -> None:
+        if self.recording:
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def start_recording(self) -> None:
+        if not self.worker.connected:
+            messagebox.showwarning(
+                "PA recording",
+                "Connect to the device before recording PA calibration data.",
+            )
+            return
+        filename = filedialog.asksaveasfilename(
+            title="Record PA calibration raw data",
+            defaultextension=".csv",
+            initialfile=f"pa_calibration_{time.strftime('%Y%m%d_%H%M%S')}",
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
+        )
+        if not filename:
+            return
+        self.record_rows = []
+        self.record_samples = 0
+        self.record_results = 0
+        self.record_file_path = Path(filename)
+        self.recording = True
+        self.record_button_text = "Stop & Save"
+        self.record_button.config(
+            text=self.record_button_text, bg=RED, activebackground="#FF7A87"
+        )
+        # d; enables raw ADC output, l; switches the sensor into PA mode.
+        self.send_command("d")
+        self.send_command("l")
+        self._append_response(f"[RECORDING] {filename}")
+
+    def stop_recording(self) -> None:
+        if not self.recording:
+            return
+        self.recording = False
+        # e; returns to endstop mode, D; disables raw data output.
+        for command in ("e", "D"):
+            try:
+                self.worker.send(command)
+            except (serial.SerialException, OSError, ValueError):
+                break
+        self.record_button_text = "Record PA CSV"
+        self.record_button.config(
+            text=self.record_button_text, bg=GREEN, activebackground=CARD_HOVER
+        )
+
+        rows = self.record_rows
+        self.record_rows = []
+        path = self.record_file_path
+        self.record_file_path = None
+
+        raw_count = sum(1 for row in rows if row[1] == "raw")
+        result_count = sum(1 for row in rows if row[1] == "result")
+        if not rows or path is None:
+            messagebox.showinfo(
+                "PA recording", "No data was captured, so no CSV file was written."
+            )
+            return
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(PA_CSV_HEADER)
+                writer.writerows(rows)
+        except OSError as exc:
+            messagebox.showerror("PA recording", f"Could not write {path}:\n{exc}")
+            return
+        self._append_response(
+            f"[RECORDED] {raw_count} samples, {result_count} PA results -> {path}"
+        )
+        messagebox.showinfo(
+            "PA recording",
+            f"Saved {raw_count} raw samples and {result_count} PA results to:\n{path}",
+        )
+
+    def _record_line(self, timestamp: float, line: str) -> None:
+        text = line.strip()
+        elapsed = timestamp - self.start_time
+        if text.startswith("R:") and "," in text:
+            fields = []
+            for item in text[2:].split(",")[:5]:
+                try:
+                    fields.append(int(item.strip()))
+                except ValueError:
+                    fields.append("")
+            fields += [""] * (5 - len(fields))
+            self.record_rows.append((f"{elapsed:.6f}", "result", "", *fields, ""))
+            self.record_results += 1
+            return
+        cleaned = text.replace(";", "").strip()
+        if NUMBER_RE.fullmatch(cleaned):
+            value = float(cleaned)
+            if value.is_integer():
+                value = int(value)
+            self.record_rows.append(
+                (f"{elapsed:.6f}", "raw", value, "", "", "", "", "", "")
+            )
+            self.record_samples += 1
+            return
+        self.record_rows.append((f"{elapsed:.6f}", "message", "", "", "", "", "", "", text))
+
+    def toggle_replay(self) -> None:
+        if not self.replay_times:
+            self.choose_replay_file()
+            return
+        if self.replay_playing:
+            self._replay_stop()
+        else:
+            if self.replay_position >= self.replay_times[-1] - 1e-9:
+                self.replay_position = self.replay_times[0]
+            self._replay_start()
+
+    def choose_replay_file(self) -> None:
+        filename = filedialog.askopenfilename(
+            title="Open recorded PA data",
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
+        )
+        if filename:
+            self._load_replay(filename)
+
+    def _load_replay(self, filename: str) -> None:
+        try:
+            times, values, results = self._read_replay_csv(filename)
+        except OSError as exc:
+            messagebox.showerror("Replay", f"Could not read {filename}:\n{exc}")
+            return
+        except ValueError as exc:
+            messagebox.showerror("Replay", f"Unsupported CSV: {exc}")
+            return
+        if not times:
+            messagebox.showerror("Replay", "No raw samples found in this file.")
+            return
+        self._clear_replay()
+        self.replay_times = times
+        self.replay_values = values
+        # put each PA result marker on the raw sample nearest in time
+        for result_time, *_rest in results:
+            index = min(max(bisect_left(times, result_time), 1), len(times) - 1)
+            if abs(times[index] - result_time) > abs(times[index - 1] - result_time):
+                index -= 1
+            self.replay_markers.append((result_time, values[index]))
+        self.replay_file = filename
+        self.replay_speed_combo.config(state="readonly")
+        self._append_response(
+            f"[REPLAY] {Path(filename).name}: {len(times)} samples, "
+            f"{len(results)} PA results, {times[-1] - times[0]:.1f} s"
+        )
+        self.replay_position = times[0]
+        self._replay_start()
+
+    def _read_replay_csv(self, filename: str):
+        times: list[float] = []
+        values: list[float] = []
+        results: list[tuple] = []
+        with open(filename, encoding="utf-8-sig", newline="") as stream:
+            reader = csv.reader(stream)
+            rows = [row for row in reader if row and any(cell.strip() for cell in row)]
+        if rows and rows[0][0].strip().lower() == "time_s":
+            rows = rows[1:]
+        for row in rows:
+            cells = [cell.strip() for cell in row]
+            try:
+                sample_time = float(cells[0])
+            except (ValueError, IndexError):
+                continue
+            if len(cells) >= 3 and cells[1].lower() in ("raw", "result"):
+                if cells[1].lower() == "raw":
+                    try:
+                        value = float(cells[2])
+                    except ValueError:
+                        continue
+                    times.append(sample_time)
+                    values.append(value)
+                else:
+                    fields = []
+                    for cell in cells[3:8]:
+                        try:
+                            fields.append(int(float(cell)))
+                        except ValueError:
+                            fields.append(0)
+                    fields += [0] * (5 - len(fields))
+                    results.append((sample_time, *fields))
+            elif len(cells) == 2:
+                try:
+                    value = float(cells[1])
+                except ValueError:
+                    continue
+                times.append(sample_time)
+                values.append(value)
+        order = sorted(range(len(times)), key=lambda i: times[i])
+        times = [times[i] for i in order]
+        values = [values[i] for i in order]
+        return times, values, results
+
+    def _replay_start(self) -> None:
+        self.replay_playing = True
+        self.replay_play_t0 = self.replay_position
+        self.replay_wall_t0 = time.monotonic()
+        self._update_replay_button()
+        self._update_plot_state_label()
+
+    def _replay_stop(self) -> None:
+        self.replay_playing = False
+        self._update_replay_button()
+        self._update_plot_state_label()
+
+    def _clear_replay(self) -> None:
+        self.replay_times = []
+        self.replay_values = []
+        self.replay_markers = []
+        self.replay_file = ""
+        self.replay_playing = False
+        self.replay_position = 0.0
+        self.replay_marker_line.set_data([], [])
+        self.replay_speed_combo.config(state="disabled")
+        self._update_replay_button()
+        self._update_plot_state_label()
+
+    def _on_replay_speed(self, _event=None) -> None:
+        text = self.replay_speed_var.get().strip()
+        if text.lower() == "max":
+            self.replay_speed = float("inf")
+        else:
+            try:
+                self.replay_speed = max(0.1, float(text.rstrip("xX")))
+            except ValueError:
+                self.replay_speed = 1.0
+
+    def _update_replay_button(self) -> None:
+        if not self.replay_times:
+            text, bg, fg = "Replay CSV", CARD, TEXT
+        elif self.replay_playing:
+            text, bg, fg = "Stop Replay", ACCENT, "#FFFFFF"
+        else:
+            text, bg, fg = "Play Replay", CARD, TEXT
+        self.replay_button.config(text=text, bg=bg, fg=fg, activeforeground=fg)
+
+    def _update_plot_state_label(self) -> None:
+        if self.replay_times:
+            self.plot_state_label.config(text="REPLAY", fg=ACCENT)
+        elif self.paused:
+            self.plot_state_label.config(text="PAUSED", fg=YELLOW)
+        else:
+            self.plot_state_label.config(text="LIVE", fg=GREEN)
+
+    def _refresh_replay(self, now: float, window: float) -> None:
+        times = self.replay_times
+        values = self.replay_values
+        t_first, t_last = times[0], times[-1]
+        if self.replay_playing:
+            elapsed = (now - self.replay_wall_t0) * self.replay_speed
+            current = self.replay_play_t0 + elapsed
+            if current >= t_last:
+                current = t_last
+                self._replay_stop()
+                self._append_response("[REPLAY] finished")
+        else:
+            current = self.replay_position
+        self.replay_position = current
+
+        x_min = max(t_first, current - window)
+        x_max = max(t_first + window, current + window * 0.04)
+
+        first_visible = bisect_left(times, x_min)
+        end_visible = bisect_left(times, x_max)
+        visible_times = times[first_visible:end_visible]
+        visible_values = values[first_visible:end_visible]
+
+        self.plot_line.set_data(visible_times, visible_values)
+        marker_times = []
+        marker_values = []
+        for marker_time, marker_value in self.replay_markers:
+            if x_min <= marker_time <= x_max:
+                marker_times.append(marker_time)
+                marker_values.append(marker_value)
+        self.replay_marker_line.set_data(marker_times, marker_values)
+
+        self.axes.set_xlim(x_min, x_max)
+        if self.auto_scale_var.get() and visible_values:
+            low = min(visible_values)
+            high = max(visible_values)
+            span = high - low
+            margin = max(1.0, span * 0.12, abs(high) * 0.002)
+            self.axes.set_ylim(low - margin, high + margin)
+
+        if visible_values:
+            self.latest_var.set(f"{visible_values[-1]:.2f}")
+        self.min_var.set(f"{min(values):.2f}")
+        self.max_var.set(f"{max(values):.2f}")
+        self.points_var.set(str(len(values)))
+        self.canvas.draw_idle()
+
     def _poll_events(self) -> None:
         processed = 0
         while processed < 5000:
@@ -1520,6 +1862,8 @@ class SerialMonitorApp:
             elif event[0] == "error":
                 _, error = event
                 self._append_response(f"[SERIAL ERROR] {error}")
+                if self.recording:
+                    self.stop_recording()
                 self.worker.disconnect()
                 self._set_connected_state(False)
             elif event[0] == "flash_log":
@@ -1540,6 +1884,8 @@ class SerialMonitorApp:
 
     def _handle_serial_line(self, timestamp: float, line: str) -> None:
         self._append_response(line)
+        if self.recording:
+            self._record_line(timestamp, line)
         cleaned = line.replace(";", "").strip()
         if not NUMBER_RE.fullmatch(cleaned):
             return
@@ -1570,6 +1916,7 @@ class SerialMonitorApp:
     def clear_data(self) -> None:
         self.time_data.clear()
         self.value_data.clear()
+        self._clear_replay()
         self.latest_var.set("--")
         self.min_var.set("--")
         self.max_var.set("--")
@@ -1583,21 +1930,26 @@ class SerialMonitorApp:
     def toggle_pause(self) -> None:
         self.paused = not self.paused
         self.pause_button.config(text="Resume" if self.paused else "Pause")
-        self.plot_state_label.config(
-            text="PAUSED" if self.paused else "LIVE",
-            fg=YELLOW if self.paused else GREEN,
-        )
+        self._update_plot_state_label()
 
     def _refresh_plot(self) -> None:
         now = time.monotonic()
         window = max(1.0, self.window_var.get())
         self.window_label.config(text=f"{window:.0f} s")
 
+        if self.recording:
+            count_text = f"Stop ({self.record_samples})"
+            if count_text != self.record_button_text:
+                self.record_button_text = count_text
+                self.record_button.config(text=count_text)
+
         if self.response_dirty and now - self.last_response_update >= 0.20:
             self._update_response_widget()
             self.last_response_update = now
 
-        if not self.paused and self.value_data:
+        if self.replay_times:
+            self._refresh_replay(now, window)
+        elif not self.paused and self.value_data:
             times = list(self.time_data)
             values = list(self.value_data)
             latest_time = times[-1]
@@ -1642,6 +1994,15 @@ class SerialMonitorApp:
             "I;  Inverted polarity",
             "N;  Use current data as normal",
             "",
+            "Record PA CSV button:",
+            "       Start: pick a CSV file, sends d; + l; (raw output + PA mode).",
+            "       Stop: sends e; + D; and writes the CSV.",
+            "",
+            "Replay CSV button:",
+            "       Load a recorded CSV and play it back on the plot;",
+            "       … picks a file, the combo box sets the speed",
+            "       (0.25x-50x/Max, default 1x = real time).",
+            "",
             "Shortcuts:",
             "Space  Pause / resume plot",
             "Ctrl+L Clear plot",
@@ -1658,6 +2019,8 @@ class SerialMonitorApp:
                 parent=self.flash_dialog or self.root,
             )
             return
+        if self.recording:
+            self.stop_recording()
         self.worker.disconnect()
         self.root.destroy()
 
