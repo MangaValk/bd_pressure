@@ -90,6 +90,16 @@ typedef struct
     unsigned char range;
     unsigned char set_normal; // 0:auto find normal_z ; 1:use current data as the normal_z ; 2: disable auto find normal_z
     unsigned char invert_data;
+    // ---- load-check extension v1: appended so offsets 0-53 stay unchanged.
+    // Hosts that do not know it never read or write these bytes.
+    // All fields are bytes so the compiler adds no padding.
+    unsigned char ext_magic[2];   // 54-55: 0xBD,0x01 = extension present
+    unsigned char chk_ctrl;       // 56: host writes 1 = start check, 0 = stop
+    unsigned char chk_state;      // 57: bit0 check running, bit1 above threshold now
+    unsigned char chk_peak[2];    // 58-59: peak |delta| since start, uint16 LE
+    unsigned char chk_above[2];   // 60-61: ms above threshold since start, uint16 LE
+    unsigned char chk_longest[2]; // 62-63: longest continuous ms above threshold
+    unsigned char chk_delta[2];   // 64-65: current delta, int16 LE
     // other variable
 
 } Receive_D;
@@ -347,6 +357,91 @@ void find_normal_endstop(unsigned int *r_data,int length,char force)
 
 }
 #define AVT_CN 4
+#define EXT_MAGIC0 0xBD
+#define EXT_MAGIC1 0x01
+
+static uint8_t chk_ctrl_old = 0;
+static uint32_t chk_last_tick = 0, chk_above_ms = 0, chk_run_ms = 0, chk_longest_ms = 0;
+static uint32_t chk_peak = 0;
+
+#define CHK_BLOCKS 16      // baseline = median of 16 block averages
+#define CHK_BLOCK_N 16     // 16 samples per block, 256 samples (~0.2 s) in total
+
+// Baseline for the check: the median of short block averages, so a burst
+// (servo, vibration) just before the start only spoils a few blocks.
+static void chk_set_baseline(void)
+{
+    int avg[CHK_BLOCKS], b, i, j, t, sum, idx = r_index - 1;
+
+    for (b = 0; b < CHK_BLOCKS; b++) {
+        sum = 0;
+        for (i = 0; i < CHK_BLOCK_N; i++)
+            sum += raw_dat[get_ix(idx--)];
+        avg[b] = sum / CHK_BLOCK_N;
+    }
+    for (i = 1; i < CHK_BLOCKS; i++) {      // insertion sort, 16 values
+        t = avg[i];
+        for (j = i - 1; j >= 0 && avg[j] > t; j--)
+            avg[j + 1] = avg[j];
+        avg[j + 1] = t;
+    }
+    normal_z = (avg[CHK_BLOCKS / 2 - 1] + avg[CHK_BLOCKS / 2]) / 2;
+}
+
+static void put_u16(unsigned char *dst, uint32_t v)
+{
+    if (v > 0xffff)
+        v = 0xffff;
+    __disable_irq();
+    dst[0] = v & 0xff;
+    dst[1] = (v >> 8) & 0xff;
+    __enable_irq();
+}
+
+// Load check: while running, the baseline is frozen and the time spent
+// above THRHOLD_Z is measured. Only runs in endstop mode, the endstop
+// output itself behaves exactly as before.
+static void check_update(int delta)
+{
+    uint32_t now = HAL_GetTick(), dt, mag = abs(delta);
+
+    if (R_CMD.chk_ctrl != chk_ctrl_old) {
+        chk_ctrl_old = R_CMD.chk_ctrl;
+        if (R_CMD.chk_ctrl == 1) {
+            chk_set_baseline();
+            chk_above_ms = chk_run_ms = chk_longest_ms = chk_peak = 0;
+            chk_last_tick = now;
+            put_u16(R_CMD.chk_peak, 0);
+            put_u16(R_CMD.chk_above, 0);
+            put_u16(R_CMD.chk_longest, 0);
+            R_CMD.chk_state = 1;
+            return;
+        }
+        R_CMD.chk_state &= ~1;
+    }
+    put_u16(R_CMD.chk_delta, (uint16_t)(int16_t)delta);
+    if (!(R_CMD.chk_state & 1))
+        return;
+
+    dt = now - chk_last_tick;
+    chk_last_tick = now;
+    if (mag > chk_peak)
+        chk_peak = mag;
+    if (mag >= R_CMD.THRHOLD_Z) {
+        R_CMD.chk_state |= 2;
+        chk_above_ms += dt;
+        chk_run_ms += dt;
+        if (chk_run_ms > chk_longest_ms)
+            chk_longest_ms = chk_run_ms;
+    } else {
+        R_CMD.chk_state &= ~2;
+        chk_run_ms = 0;
+    }
+    put_u16(R_CMD.chk_peak, chk_peak);
+    put_u16(R_CMD.chk_above, chk_above_ms);
+    put_u16(R_CMD.chk_longest, chk_longest_ms);
+}
+
 int process_triggered(void)
 {
     int s_avt = 0,i,tmp_cn=0,vibration;
@@ -355,7 +450,7 @@ int process_triggered(void)
     }
     tmp_cn=2500;
 
-    if((tim14_n%tmp_cn)==(tmp_cn-1))
+    if(!(R_CMD.chk_state & 1) && (tim14_n%tmp_cn)==(tmp_cn-1))
 
     {
         tim14_n=0;
@@ -365,6 +460,7 @@ int process_triggered(void)
     for(i=r_index-1;i>r_index-1-AVT_CN;i--)
         s_avt = s_avt+raw_dat[get_ix(i)];
     s_avt = s_avt/AVT_CN;
+    check_update(s_avt-normal_z);
 
     vibration =1;
     if(abs(s_avt-normal_z)>=R_CMD.THRHOLD_Z
@@ -479,6 +575,8 @@ int main(void)
     ram_i2c = &R_CMD.version[0];
     sprintf(R_CMD.version,"pandapi3dv1\n");
     R_CMD.THRHOLD_Z=4;
+    R_CMD.ext_magic[0]=EXT_MAGIC0;
+    R_CMD.ext_magic[1]=EXT_MAGIC1;
     R_CMD.status_clk=ENDSTOP_OSR;
 
     normal_z = 0;
