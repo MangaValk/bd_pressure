@@ -371,7 +371,8 @@ static uint32_t chk_peak = 0;
 // (servo, vibration) just before the start only spoils a few blocks.
 static void chk_set_baseline(void)
 {
-    int avg[CHK_BLOCKS], b, i, j, t, sum, idx = r_index - 1;
+    int16_t avg[CHK_BLOCKS];   // samples are ~-2400..14400, fit int16; keeps the stack small
+    int b, i, j, t, sum, idx = r_index - 1;
 
     for (b = 0; b < CHK_BLOCKS; b++) {
         sum = 0;
