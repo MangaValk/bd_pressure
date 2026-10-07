@@ -48,10 +48,12 @@ the check when no print is running (or paused), waits `bdwidth_warmup_ms`
 for the first readings (10-14 s were seen) and switches it off again
 afterwards. During a print it leaves bdwidth alone.
 
-With no filament loaded, `ENABLE_ALL` also arms bdwidth's own width
-runout check, which then pauses the printer (`filament width is out of
-range: 0.000mm`). That pause also moves the toolhead, which registers as
-nozzle pressure (1589 ms in one test instead of the usual ~30 ms).
+Outside a print it uses motion-only mode (`COMMAND=ENABLE_MOTION`). An
+earlier version used `ENABLE_ALL`, which also arms bdwidth's width runout
+check: with no filament loaded that paused the printer (`filament width is
+out of range: 0.000mm`), and the pause moved the toolhead, which registered
+as nozzle pressure (1589 ms instead of the usual ~30 ms). Because width is
+off in this mode, the `width` in the result line can show 0 or an old value.
 
 ## Settings and rollout
 
