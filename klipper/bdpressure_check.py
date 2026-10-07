@@ -79,9 +79,14 @@ class BDPressureCheck:
                                         s['delta']))
 
     def cmd_START(self, gcmd):
+        # The values read here are still the previous check's, so only
+        # confirm the start instead of printing them.
         if self._read():
             self.i2c.i2c_write([REG_CTRL, 1])
-            self.status['running'] = True
+            self.status.update({'running': True, 'peak': 0, 'above_ms': 0,
+                                'longest_ms': 0})
+            gcmd.respond_info("BDP_CHECK_START: started")
+            return
         self._respond(gcmd, "BDP_CHECK_START")
 
     def cmd_STOP(self, gcmd):
