@@ -47,9 +47,10 @@ COMMAND=ENABLE_ALL` (or `ENABLE_MOTION` / `ENABLE_WIDTH`). After
 `ENABLE`, it reads nothing, so print start macros usually enable it and
 print end macros disable it.
 
-`BLOBIFIER_CHECKED` therefore switches it on for the check when no print
-is running (or paused) and off again afterwards; during a print it leaves
-bdwidth alone. Outside a print it:
+`bdwidth_status.py` reports whether bdwidth is actually reading
+(`reading`, from bdwidth's read timer). When it is not, outside a print
+or early in a print start before the start macro enables it,
+`BLOBIFIER_CHECKED`:
 
 1. turns bdwidth's runout response off (`SET_FILAMENT_SENSOR SENSOR=...
    ENABLE=0`), so an empty lane is reported by the check instead of
@@ -58,8 +59,12 @@ bdwidth alone. Outside a print it:
    adjustment stays off during the purge,
 3. waits `bdwidth_warmup_ms`: bdwidth's first read often fails and it
    retries after 10 s,
-4. runs the purge with both checks, then `COMMAND=DISABLE` and restores the
-   runout response to what it was before.
+4. runs the purge with both checks and restores the runout response to what
+   it was before. Outside a print it also switches bdwidth off again
+   (`COMMAND=DISABLE`); during a print it leaves it on, so a print never
+   loses bdwidth because of the check.
+
+When bdwidth is already reading, the check uses it as it is.
 
 Without step 1, a check with no filament loaded made bdwidth pause the
 printer (`filament width is out of range: 0.000mm`), and the pause moved
@@ -105,7 +110,7 @@ instead of 1.75); the check does not use the width.
 
 | Message | Cause |
 |---|---|
-| `FAIL: no data from bdwidth since Klipper start` | bdwidth has not read anything since the restart. It only starts on `SET_BDWIDTH ... COMMAND=ENABLE...`, even though its status shows `active: "all"` before that. During a print: does your print start macro enable it? Otherwise: is it connected? |
+| `FAIL: no data from bdwidth since Klipper start` | bdwidth was enabled but delivered nothing: is it connected, and is `bdwidth_warmup_ms` long enough? (An earlier version of the check also gave this when a tool change in the print start ran before the start macro enabled bdwidth.) |
 | `motion skipped (bdwidth disabled)` during a print | bdwidth was switched off with `SET_BDWIDTH ... COMMAND=DISABLE`; the check leaves it alone during a print |
 | `pressure skipped (no check firmware)` | stock bd_pressure firmware, or `[bdpressure_check]` missing |
 | `PURGE_CHECK ?:` | no lane loaded according to AFC |

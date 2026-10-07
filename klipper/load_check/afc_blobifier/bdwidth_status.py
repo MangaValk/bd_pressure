@@ -17,6 +17,8 @@
 #   last_motion    - counts seen in the last sample
 #   diameter       - last width reading in mm (0.0 on a bad reading)
 #   name           - the sensor name, for SET_BDWIDTH NAME=...
+#   reading        - True while bdwidth is polling the sensor (after
+#                    SET_BDWIDTH ... ENABLE..., until DISABLE)
 #   enabled        - runout response on (SET_FILAMENT_SENSOR ENABLE=1/0);
 #                    says nothing about whether bdwidth is reading
 #   active         - "motion", "width", "all" or "disable" (SET_BDWIDTH). After
@@ -46,8 +48,15 @@ class BDWidthStatus:
             enabled = bool(s.get_status(eventtime).get('enabled', True))
         except Exception:
             enabled = True
+        # bdwidth reads from a reactor timer that only SET_BDWIDTH ... ENABLE
+        # starts and DISABLE stops; is_active alone does not show it
+        timer = getattr(s, 'extrude_factor_update_timer', None)
+        never = self.printer.get_reactor().NEVER
+        reading = (timer is not None and getattr(timer, 'waketime', never) != never
+                   and 'disable' not in str(getattr(s, 'is_active', 'disable')))
         return {
             'name': self.name,
+            'reading': reading,
             'enabled': enabled,
             'total_move': getattr(s, 'actual_total_move', 0),
             'last_motion': getattr(s, 'lastMotionReading', 0),
