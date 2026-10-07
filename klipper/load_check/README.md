@@ -188,6 +188,9 @@ once without, and set it well between the two. Toolhead moves during the
 check (a park move, a wipe) also register as pressure, so keep the toolhead
 still while measuring if you can.
 
+For AFC with a Blobifier and a bdwidth there is a complete example that
+checks every purge: [afc_blobifier/README.md](afc_blobifier/README.md).
+
 ## Comparing PA calibration
 
 To check that a firmware calibrates PA like another one, use the same
