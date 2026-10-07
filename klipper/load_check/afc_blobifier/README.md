@@ -95,6 +95,7 @@ Reference values from the test printer (150 mm Blobifier purge):
 | good load, lane1 | 0.63-0.67 | 17-18 s |
 | good load, lane4 (full `CHANGE_TOOL`) | 1.26 | 18 s |
 | no filament | 0.00 | 31 ms, 1589 ms with a runout pause during the purge |
+| real failed load in a print start (AFC reported lane1 loaded) | 0.00, width 0.000 | 1915 ms, peak 45: caught, print paused in `enforce` |
 
 The ratio depends on the filament: the bdwidth's measuring wheel grips or
 slips differently on different spools, so one `motion_linear_coefficient`
