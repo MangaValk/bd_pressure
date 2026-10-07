@@ -62,3 +62,8 @@ writes nothing.
 [bdpressure_check]
 sensor: bd_pa
 ```
+
+Flashing, installation, a macro example, test results and build notes:
+[klipper/load_check/README.md](../klipper/load_check/README.md).
+A prebuilt firmware is in
+`release_hex/BDpressureE_loadcheck_20261007.hex`.
