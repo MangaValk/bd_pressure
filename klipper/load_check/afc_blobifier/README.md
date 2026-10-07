@@ -41,19 +41,31 @@ PURGE_CHECK ?: motion 0.0/149.2 mm ratio 0.00, width 0.00; pressure longest 31 m
 
 ## bdwidth outside a print
 
-If your print start/end macros switch bdwidth on and off
-(`SET_BDWIDTH NAME=... COMMAND=ENABLE_ALL` / `COMMAND=DISABLE`), it reads
-nothing between prints. `BLOBIFIER_CHECKED` therefore switches it on for
-the check when no print is running (or paused), waits `bdwidth_warmup_ms`
-for the first readings (10-14 s were seen) and switches it off again
-afterwards. During a print it leaves bdwidth alone.
+bdwidth only reads while it is enabled with `SET_BDWIDTH NAME=...
+COMMAND=ENABLE_ALL` (or `ENABLE_MOTION` / `ENABLE_WIDTH`). After
+`COMMAND=DISABLE`, and after every Klipper restart until the next
+`ENABLE`, it reads nothing, so print start macros usually enable it and
+print end macros disable it.
 
-Outside a print it uses motion-only mode (`COMMAND=ENABLE_MOTION`). An
-earlier version used `ENABLE_ALL`, which also arms bdwidth's width runout
-check: with no filament loaded that paused the printer (`filament width is
-out of range: 0.000mm`), and the pause moved the toolhead, which registered
-as nozzle pressure (1589 ms instead of the usual ~30 ms). Because width is
-off in this mode, the `width` in the result line can show 0 or an old value.
+`BLOBIFIER_CHECKED` therefore switches it on for the check when no print
+is running (or paused) and off again afterwards; during a print it leaves
+bdwidth alone. Outside a print it:
+
+1. turns bdwidth's runout response off (`SET_FILAMENT_SENSOR SENSOR=...
+   ENABLE=0`), so an empty lane is reported by the check instead of
+   bdwidth pausing the printer,
+2. enables motion only (`COMMAND=ENABLE_MOTION`), so the width-based flow
+   adjustment stays off during the purge,
+3. waits `bdwidth_warmup_ms`: bdwidth's first read often fails and it
+   retries after 10 s,
+4. runs the purge with both checks, then `COMMAND=DISABLE` and restores the
+   runout response to what it was before.
+
+Without step 1, a check with no filament loaded made bdwidth pause the
+printer (`filament width is out of range: 0.000mm`), and the pause moved
+the toolhead, which registered as nozzle pressure (1589 ms instead of the
+usual ~30 ms). bdwidth reads the width in every mode, so the `width` in
+the result line is always a current reading.
 
 ## Settings and rollout
 
@@ -93,7 +105,7 @@ instead of 1.75); the check does not use the width.
 
 | Message | Cause |
 |---|---|
-| `FAIL: no data from bdwidth since Klipper start` | bdwidth sends nothing. Is it connected and switched on? Klipper's view of it (`active`, `enabled`) can say on while the sensor itself is off. |
-| `motion 0.0/...` with filament loaded | bdwidth was switched off (`SET_BDWIDTH ... COMMAND=DISABLE`) while a print was running or paused, where the check leaves it alone |
+| `FAIL: no data from bdwidth since Klipper start` | bdwidth has not read anything since the restart. It only starts on `SET_BDWIDTH ... COMMAND=ENABLE...`, even though its status shows `active: "all"` before that. During a print: does your print start macro enable it? Otherwise: is it connected? |
+| `motion skipped (bdwidth disabled)` during a print | bdwidth was switched off with `SET_BDWIDTH ... COMMAND=DISABLE`; the check leaves it alone during a print |
 | `pressure skipped (no check firmware)` | stock bd_pressure firmware, or `[bdpressure_check]` missing |
 | `PURGE_CHECK ?:` | no lane loaded according to AFC |

@@ -17,9 +17,11 @@
 #   last_motion    - counts seen in the last sample
 #   diameter       - last width reading in mm (0.0 on a bad reading)
 #   name           - the sensor name, for SET_BDWIDTH NAME=...
-#   enabled        - False while switched off with SET_FILAMENT_SENSOR
-#                    (SET_BDWIDTH COMMAND=DISABLE is not reflected here)
-#   active         - "motion", "width", "all" or "disable"
+#   enabled        - runout response on (SET_FILAMENT_SENSOR ENABLE=1/0);
+#                    says nothing about whether bdwidth is reading
+#   active         - "motion", "width", "all" or "disable" (SET_BDWIDTH). After
+#                    a Klipper restart it shows the config value, but bdwidth
+#                    only starts reading on the first SET_BDWIDTH ... ENABLE
 #   linear_motion  - counts per mm (motion_linear_coefficient)
 #   sample_time    - seconds between sensor reads
 
