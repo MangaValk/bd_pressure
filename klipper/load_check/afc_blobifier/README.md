@@ -73,12 +73,19 @@ Reference values from the test printer (150 mm Blobifier purge):
 
 | | ratio | longest pressure |
 |---|---|---|
-| good loads | 0.63-0.67 | 17-18 s |
+| good load, lane1 | 0.63-0.67 | 17-18 s |
+| good load, lane4 (full `CHANGE_TOOL`) | 1.26 | 18 s |
 | no filament | 0.00 | 31 ms, 1589 ms with a runout pause during the purge |
 
-The ratio stays below 1.0 there because the bdwidth's
-`motion_linear_coefficient` does not quite match; that does not matter for
-the check, only the gap between good and empty does.
+The ratio depends on the filament: the bdwidth's measuring wheel grips or
+slips differently on different spools, so one `motion_linear_coefficient`
+does not fit them all. That does not matter for the check, only the gap
+between good and empty does; collect values per lane before raising
+`min_ratio`.
+
+The `width` in the result line is the last single reading. The bdwidth
+sometimes reports about twice the real width for one sample (3.4-3.6 mm
+instead of 1.75); the check does not use the width.
 
 ## Troubleshooting
 
